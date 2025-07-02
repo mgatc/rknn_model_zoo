@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <string>
 
 #include "retinaface.h"
 #include "image_utils.h"
@@ -66,12 +67,35 @@ int main(int argc, char **argv) {
         int ry = result.object[i].box.top;
         int rw = result.object[i].box.right - result.object[i].box.left;
         int rh = result.object[i].box.bottom - result.object[i].box.top;
+
+        // save a copy of the face
+        image_buffer_t face_image;
+        memset(&face_image, 0, sizeof(image_buffer_t));
+        face_image.format = IMAGE_FORMAT_RGB888;
+        face_image.size = 224*224*3;
+        face_image.virt_addr = (unsigned char *)malloc(face_image.size);
+        face_image.height = 224;
+        face_image.width = 224;
+
+        image_rect_t src_box;
+        src_box.left = rx;
+        src_box.top = ry;
+        src_box.right = rx+rw;
+        src_box.bottom = ry+rh;
+
+        convert_image(&src_image, &face_image, &src_box, NULL, 0);
+
+        write_image(std::string(std::string("face-") + std::to_string(i) + ".jpg").c_str(), &face_image);
+
+        free(face_image.virt_addr);
+
+        // draw on original
         draw_rectangle(&src_image, rx, ry, rw, rh, COLOR_GREEN, 3);
         char score_text[20];
         snprintf(score_text, 20, "%0.2f", result.object[i].score);
         printf("face @(%d %d %d %d) score=%f\n", result.object[i].box.left, result.object[i].box.top,
                result.object[i].box.right, result.object[i].box.bottom, result.object[i].score);
-        draw_text(&src_image, score_text, rx, ry, COLOR_RED, 20);
+        draw_text(&src_image, score_text, rx+rw, ry+rh, COLOR_RED, 12);
         for(int j = 0; j < 5; j++) {
             draw_circle(&src_image, result.object[i].ponit[j].x, result.object[i].ponit[j].y, 2, COLOR_ORANGE, 4);
         }
