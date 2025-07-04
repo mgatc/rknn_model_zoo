@@ -83,7 +83,18 @@ int main(int argc, char **argv) {
         src_box.right = rx+rw;
         src_box.bottom = ry+rh;
 
-        convert_image(&src_image, &face_image, &src_box, NULL, 0);
+        printf("Src box: %d %d %d %d width: %d height: %d\n", src_box.left, src_box.top, src_box.right, src_box.bottom, rw, rh);
+
+        // The detected face region may not be a square, but the model requires a square input, so make sure the aspect ratio is preserved.
+        image_rect_t dst_box;
+        dst_box.left =   (rw < rh ? (224-(224*rw/rh))/2 : 0);
+        dst_box.right =  (rw < rh ? dst_box.left + (224*rw/rh) : 224);
+        dst_box.top =    (rw > rh ? (224-(224*rh/rw))/2 : 0);
+        dst_box.bottom = (rw > rh ? dst_box.top + (224*rh/rw) : 224);
+
+        printf("Dst box: %d %d %d %d\n", dst_box.left, dst_box.top, dst_box.right, dst_box.bottom);
+
+        convert_image(&src_image, &face_image, &src_box, &dst_box, 0);
 
         write_image(std::string(std::string("face-") + std::to_string(i) + ".jpg").c_str(), &face_image);
 
