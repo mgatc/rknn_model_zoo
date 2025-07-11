@@ -33,6 +33,7 @@ target_link_libraries(${PROJECT_NAME}
     imagedrawing
     ${LIBRKNNRT}
     dl
+    jsoncpp
 )
 
 if (CMAKE_SYSTEM_NAME STREQUAL "Android")
