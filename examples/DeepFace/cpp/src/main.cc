@@ -347,6 +347,8 @@ int main(int argc, char* argv[]){
                                 builder["commentStyle"] = "None";
                                 builder["indentation"] = "";
                                 builder["precision"] = 2;
+
+                                root["imgPath"] = s;
 #ifdef DYNAMIC_SHAPE_COMPATABLE
                                 // set input shape
                                 rknn_tensor_attr shape_container[Age_ctx.n_input];
