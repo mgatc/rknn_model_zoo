@@ -3,6 +3,11 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/inotify.h>
+#include <signal.h>
+#include <limits.h>
+#include <json/json.h>
+#include <cassert>
 
 #include "rknn_api.h"
 
@@ -13,6 +18,18 @@
 
 #define DYNAMIC_SHAPE_COMPATABLE
 
+#ifdef USE_INOTIFY
+#define BUF_LEN (10 * (sizeof(struct inotify_event) + NAME_MAX + 1))
+#define DASH_EVENT_MASK (IN_MOVED_TO | IN_CLOSE_WRITE)
+
+bool g_quit = false;
+
+void cleanupSigHandler(int s)
+{
+    g_quit = true;
+	printf("Caught signal %d\n",s);
+}
+#endif
 
 int load_input_data(rknn_app_context_t* rknn_app_ctx, const char* input_path, rknn_app_buffer* input_buffer){
     printf("\nLOAD INPUTS\n");
@@ -78,13 +95,14 @@ int loop_run(rknn_app_context_t* rknn_app_ctx, rknn_app_buffer* input_buffer, rk
 int post_process_check_consine_similarity(rknn_app_context_t* rknn_app_ctx,
                                           rknn_app_buffer* output_buffer,
                                           const char* output_folder, 
-                                          const char* golden_folder)
+                                          const char* golden_folder,
+                                        Json::Value &root)
 {
     int ret = 0;
     printf("\nCHECK OUTPUT\n");
     printf("  check all output to '%s'\n", output_folder);
     printf("  with golden data in '%s'\n", golden_folder);
-    ret = folder_mkdirs(output_folder);
+    // ret = folder_mkdirs(output_folder);
 
     float* temp_data = NULL;
     rknn_tensor_attr* attr = NULL;
@@ -110,7 +128,56 @@ int post_process_check_consine_similarity(rknn_app_context_t* rknn_app_ctx,
         char* golden_path = get_output_path(name_strings, golden_folder);
         char* output_path = get_output_path(name_strings, output_folder);
         temp_data = (float*)rknn_app_unwrap_output_buffer(rknn_app_ctx, &output_buffer[idx], RKNN_TENSOR_FLOAT32, idx);
-        save_npy(output_path, temp_data, attr);
+        
+        // save_npy(output_path, temp_data, attr);
+        root["name"] = name_strings;
+        root["shape"] = Json::arrayValue;
+        root["data"];
+
+        for (uint32_t colIdx = 0; colIdx < attr->n_dims; ++colIdx)
+        {
+            root["shape"][colIdx] = attr->dims[colIdx];
+        }
+
+        enum {
+            INFERENCE_NONE,
+            INFERENCE_DEEPFACE_GENDER,
+            INFERENCE_DEEPFACE_AGE,
+            INFERENCE_DEEPFACE_RACE,
+            INFERENCE_DEEPFACE_EMOTION,
+        };
+        // TODO: make this a parameter to the function
+        int inference_type = INFERENCE_DEEPFACE_GENDER;
+
+        switch (inference_type)
+        {
+            case INFERENCE_DEEPFACE_GENDER:
+                assert(attr->n_dims == 2);
+                assert(attr->dims[0] == 1);
+                assert(attr->dims[1] == 2);
+
+                root["data"]["gender"]["prob_female"] = temp_data[0];
+                root["data"]["gender"]["prob_male"] = temp_data[1];
+
+                break;
+
+            default:
+                // General algorithm to write an n-dimensional array to json
+                size_t currentIdx = 0;
+                Json::Value &walk = root["data"];
+                for (size_t colIdx=0; colIdx < attr->n_dims; colIdx++)
+                {
+                    walk[(int)colIdx] = Json::arrayValue;
+                    for (size_t cellIdx=0; cellIdx<attr->dims[colIdx]; cellIdx++)
+                    {
+                        root["data"][(int)colIdx][(int)cellIdx] = temp_data[currentIdx++];
+                    }
+                    walk = walk[(int)colIdx];
+                }
+        }
+
+
+
         free(temp_data);
 
         if (access(golden_path, F_OK) == 0){
@@ -162,21 +229,36 @@ int get_data_shapes(const char* input_path, rknn_tensor_attr* shape_container){
 
 int main(int argc, char* argv[]){
     if (argc < 2 ){
-        printf("Usage: ./rknn_app_demo model_path image_path repeat_times\n");
-        printf("  Example: ./rknn_app_demo ./Age.rknn ./test.npy 20\n");
+        printf("Usage: ./rknn_app_demo model_path image_dir repeat_times\n");
+        printf("  Example: ./rknn_app_demo ./Age.rknn ./data/ 20\n");
         return -1;
     }
+
+#ifdef USE_INOTIFY
+ 	struct sigaction sigIntHandler;
+
+    sigIntHandler.sa_handler = cleanupSigHandler;
+    sigemptyset(&sigIntHandler.sa_mask);
+    sigIntHandler.sa_flags = 0;
+
+    sigaction(SIGINT, &sigIntHandler, NULL);
+    sigaction(SIGTERM, &sigIntHandler, NULL);
+#endif
     int ret = 0;
 
-    const char* inputs_path = NULL;
-    if (argc > 2){
-        inputs_path = argv[2];
-    }
+    // TODO: make model_path optional. if no path given, loop over all models and create one .out.json file
+    std::vector<std::string> models {
+        "facial_attribute.Gender.rknn",
+        // "facial_attribute.Age.rknn",
+        // "facial_attribute.Race.rknn",
+        // "facial_attribute.Emotion.rknn",
+    };
 
     // init rknn_app
     rknn_app_context_t Age_ctx;
     memset(&Age_ctx, 0, sizeof(rknn_app_context_t));
     const char* model_path = argv[1];
+    std::string inpath (argv[2]);
     bool verbose_log = true;
     ret = init_rknn_app(&Age_ctx, model_path, verbose_log);
     if (ret != 0){
@@ -184,54 +266,165 @@ int main(int argc, char* argv[]){
         return -1;
     }
 
+
+#ifdef USE_INOTIFY
+    int inotifyFd, wd;
+    char buf[BUF_LEN] __attribute__((aligned(8)));
+    ssize_t numRead;
+    struct inotify_event *event;
+
+    inotifyFd = inotify_init();
+    if (inotifyFd == -1)
+    {
+        perror("inotify_init");
+        return NULL;
+    }
+
+    wd = inotify_add_watch(inotifyFd, infolder.c_str(), DASH_EVENT_MASK);
+    if (wd == -1)
+    {
+        perror("inotify_add_watch");
+        return NULL;
+    }
+
+    time_t prev = 0;
+
+    while (!g_quit)
+    {
+        int return_value;
+        fd_set descriptors;
+        struct timeval time_to_wait;
+
+        FD_ZERO(&descriptors);
+        FD_SET(inotifyFd, &descriptors);
+
+        time_to_wait.tv_sec = 1;
+        time_to_wait.tv_usec = 0;
+
+        return_value = select(inotifyFd + 1, &descriptors, NULL, NULL, &time_to_wait);
+
+        if (return_value < 0)
+        {
+            /* Error */
+            sleep(1); // don't know what to do here, coding error, which should never get committed.
+            continue;
+        }
+        else if (!return_value)
+        {
+            //continue;  // do not continue, need to service the init segs.
+        }
+        else if (FD_ISSET(inotifyFd, &descriptors))
+        {
+            /* Process the inotify events */
+            numRead = read(inotifyFd, buf, BUF_LEN);
+            if (numRead == 0)
+                perror("read() from inotify fd returned 0!");
+            else if (numRead == -1)
+                perror("read");
+            else
+            {
+                for (char *p = buf; p < buf + numRead;)
+                {
+                    event = (struct inotify_event *)p;
+                    if (event->len > 0)
+                    {
+                        std::string ps(event->name);
+                        size_t pos = ps.find_last_of(".");
+                        if (pos != std::string::npos)
+                        {
+                            if (ps.compare(pos + 1, 3, "tmp") != 0) // ffmpeg will write/close tmp files, ignore.
+                            {
+                                std::string s(infolder);
+                                s.append("/");
+                                s.append(ps);
+//                                fprintf(stderr, "Inot: %s\n", s.c_str());
+#else
+                                std::string s(inpath);
+                                std::string ps(basename(s.c_str()));
+#endif
+                                Json::Value root;
+                                Json::StreamWriterBuilder builder;
+                                builder["commentStyle"] = "None";
+                                builder["indentation"] = "";
+                                builder["precision"] = 2;
 #ifdef DYNAMIC_SHAPE_COMPATABLE
-    // set input shape
-    rknn_tensor_attr shape_container[Age_ctx.n_input];
-    memset(shape_container, 0, sizeof(rknn_tensor_attr) * Age_ctx.n_input);
-    ret = get_data_shapes(inputs_path, shape_container);
-    if (ret < 0){
-        ret = rknn_app_switch_dyn_shape(&Age_ctx, Age_ctx.in_attr);
-    }
-    else{
-        ret = rknn_app_switch_dyn_shape(&Age_ctx, shape_container);
-    }
-    if (ret != 0){
-        printf("set input shape failed\n");
-        return -1;
-    }
+                                // set input shape
+                                rknn_tensor_attr shape_container[Age_ctx.n_input];
+                                memset(shape_container, 0, sizeof(rknn_tensor_attr) * Age_ctx.n_input);
+                                ret = get_data_shapes(s.c_str(), shape_container);
+                                if (ret < 0){
+                                    ret = rknn_app_switch_dyn_shape(&Age_ctx, Age_ctx.in_attr);
+                                }
+                                else{
+                                    ret = rknn_app_switch_dyn_shape(&Age_ctx, shape_container);
+                                }
+                                if (ret != 0){
+                                    printf("set input shape failed\n");
+                                    return -1;
+                                }
 #endif
 
-    // init input output buffer
-    rknn_app_buffer Age_input_buffer[Age_ctx.n_input];
-    rknn_app_buffer Age_output_buffer[Age_ctx.n_output];
-    ret = init_rknn_app_input_output_buffer(&Age_ctx, Age_input_buffer, Age_output_buffer, false);
-    if (ret != 0){
-        printf("init input output buffer failed\n");
-        return -1;
-    }
+                                // init input output buffer
+                                rknn_app_buffer Age_input_buffer[Age_ctx.n_input];
+                                rknn_app_buffer Age_output_buffer[Age_ctx.n_output];
+                                ret = init_rknn_app_input_output_buffer(&Age_ctx, Age_input_buffer, Age_output_buffer, false);
+                                if (ret != 0){
+                                    printf("init input output buffer failed\n");
+                                    return -1;
+                                }
 
-    // load input data and wrap to input buffer
-    ret = load_input_data(&Age_ctx, inputs_path, Age_input_buffer);
-    int input_given = ret;
+                                // load input data and wrap to input buffer
+                                ret = load_input_data(&Age_ctx, s.c_str(), Age_input_buffer);
+                                int input_given = ret;
 
-    // inference
-    int loop_time = 1;
-    if (argc > 3){
-        loop_time = atoi(argv[3]);
-    }
-    ret = loop_run(&Age_ctx, Age_input_buffer, Age_output_buffer, loop_time);
-    if (ret != 0){
-        printf("run rknn app failed\n");
-        return -1;
-    }
+                                // inference
+                                int loop_time = 1;
+                                if (argc > 3){
+                                    loop_time = atoi(argv[3]);
+                                }
+                                ret = loop_run(&Age_ctx, Age_input_buffer, Age_output_buffer, loop_time);
+                                if (ret != 0){
+                                    printf("run rknn app failed\n");
+                                    goto out;
+                                }
 
-    // save output result as npy
-    if ((argc > 2) && (input_given>-1)){
-        ret = post_process_check_consine_similarity(&Age_ctx, Age_output_buffer, "./data/outputs/runtime", "./data/outputs/golden");
+                                // save output result as npy
+                                if ((argc > 2) && (input_given>-1)){
+                                    ret = post_process_check_consine_similarity(&Age_ctx, Age_output_buffer, inpath.c_str(), "./data/outputs/golden", root);
+                                }
+                                else{
+                                    printf("Inputs was not given, skip save output\n");
+                                }
+
+                                {
+                                    std::string response(Json::writeString(builder, root));
+
+                                    std::string resultDataPath(inpath + ".out.json");
+                                    std::ofstream dataFileOut(resultDataPath.c_str());
+
+                                    if (dataFileOut.is_open())
+                                    {
+                                        dataFileOut << response;
+                                    }
+                                    else
+                                    {
+                                        printf("Error writing data file\n");
+                                    }
+                                }
+#ifdef USE_INOTIFY
+                            }
+                        }
+                    }
+                    p += sizeof(struct inotify_event) + event->len;
+                }
+            }
+        }
     }
-    else{
-        printf("Inputs was not given, skip save output\n");
-    }
+#endif
+out:
+#ifdef USE_INOTIFY
+    inotify_rm_watch(inotifyFd, wd);
+#endif
 
     // release rknn
     release_rknn_app(&Age_ctx);

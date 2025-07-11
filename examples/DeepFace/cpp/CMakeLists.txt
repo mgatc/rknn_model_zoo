@@ -58,6 +58,7 @@ target_link_libraries(rknn_app_demo
       ${LIBZ_LIB}
       ${PTHREAD_LIB}
       dl
+      jsoncpp
   )
 if (CMAKE_SYSTEM_NAME STREQUAL "Android")
   target_link_libraries(rknn_app_demo
@@ -73,4 +74,7 @@ install(TARGETS rknn_app_demo DESTINATION ./)
 install(PROGRAMS ${RKNN_RT_LIB} DESTINATION lib)
 install(PROGRAMS ${CMAKE_SOURCE_DIR}/run.sh DESTINATION ./)
 install(DIRECTORY ${CMAKE_SOURCE_DIR}/data DESTINATION ./)
-install(PROGRAMS ${CMAKE_SOURCE_DIR}/../../model/Age.rknn DESTINATION ./)
+install(PROGRAMS ${CMAKE_SOURCE_DIR}/../model/facial_attribute.Age.rknn DESTINATION ./)
+install(PROGRAMS ${CMAKE_SOURCE_DIR}/../model/facial_attribute.Gender.rknn DESTINATION ./)
+install(PROGRAMS ${CMAKE_SOURCE_DIR}/../model/facial_attribute.Race.rknn DESTINATION ./)
+install(PROGRAMS ${CMAKE_SOURCE_DIR}/../model/facial_attribute.Emotion.rknn DESTINATION ./)
