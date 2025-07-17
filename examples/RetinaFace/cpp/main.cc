@@ -225,7 +225,38 @@ int main(int argc, char **argv) {
                                     std::string faceImgPath(resultFile + "." + "face-" + std::to_string(i) + ".jpg");
                                     write_image(faceImgPath.c_str(), &face_image);
 
+
+                                    // save 48x48 grayscale for emotion inference
+                                    image_buffer_t gray_face_image;
+                                    memset(&gray_face_image, 0, sizeof(image_buffer_t));
+                                    gray_face_image.format = IMAGE_FORMAT_GRAY8;
+                                    gray_face_image.size = 48*48*1;
+                                    gray_face_image.virt_addr = (unsigned char *)malloc(gray_face_image.size);
+                                    gray_face_image.height = 48;
+                                    gray_face_image.width = 48;
+
+                                    // image_rect_t src_box;
+                                    // src_box.left = rx;
+                                    // src_box.top = ry;
+                                    // src_box.right = rx+rw;
+                                    // src_box.bottom = ry+rh;
+
+                                    // printf("Src box: %d %d %d %d width: %d height: %d\n", src_box.left, src_box.top, src_box.right, src_box.bottom, rw, rh);
+
+                                    // // The detected face region may not be a square, but the model requires a square input, so make sure the aspect ratio is preserved.
+                                    // image_rect_t dst_box;
+                                    // dst_box.left =   (rw < rh ? (224-(224*rw/rh))/2 : 0);
+                                    // dst_box.right =  (rw < rh ? dst_box.left + (224*rw/rh) : 224);
+                                    // dst_box.top =    (rw > rh ? (224-(224*rh/rw))/2 : 0);
+                                    // dst_box.bottom = (rw > rh ? dst_box.top + (224*rh/rw) : 224);
+
+                                    // printf("Dst box: %d %d %d %d\n", dst_box.left, dst_box.top, dst_box.right, dst_box.bottom);
+
+                                    convert_image(&face_image, &gray_face_image, NULL, NULL, 0);
+                                    write_image((faceImgPath + ".gray8.48x48.png").c_str(), &gray_face_image);
+
                                     free(face_image.virt_addr);
+                                    free(gray_face_image.virt_addr);
 
                                     // draw on original
                                     draw_rectangle(&src_image, rx, ry, rw, rh, COLOR_GREEN, 3);

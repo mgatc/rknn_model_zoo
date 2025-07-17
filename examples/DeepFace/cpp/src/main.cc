@@ -8,6 +8,8 @@
 #include <limits.h>
 #include <json/json.h>
 #include <cassert>
+#include <iomanip>
+#include <algorithm>
 
 #include "rknn_api.h"
 
@@ -17,6 +19,29 @@
 #include "path_utils.h"
 
 #define DYNAMIC_SHAPE_COMPATABLE
+
+enum {
+    INFERENCE_DEEPFACE_FIRST,
+    INFERENCE_DEEPFACE_GENDER = INFERENCE_DEEPFACE_FIRST,
+    INFERENCE_DEEPFACE_AGE,
+    INFERENCE_DEEPFACE_RACE,
+    INFERENCE_DEEPFACE_EMOTION,
+    INFERENCE_DEEPFACE_LAST
+};
+
+std::vector<std::string> DEEPFACE_DEMOGRAPHIC_MODEL_PATHS {
+    "facial_attribute.Gender.rknn",
+    "facial_attribute.Age.rknn",
+    "facial_attribute.Race.rknn",
+    "facial_attribute.Emotion.rknn",
+};
+
+std::vector<std::string> DEEPFACE_DEMOGRAPHIC_MODEL_NAMES {
+    "gender",
+    "age",
+    "race",
+    "emotion",
+};
 
 #ifdef USE_INOTIFY
 #define BUF_LEN (10 * (sizeof(struct inotify_event) + NAME_MAX + 1))
@@ -91,11 +116,19 @@ int loop_run(rknn_app_context_t* rknn_app_ctx, rknn_app_buffer* input_buffer, rk
     return ret;
 }
 
-
+template <typename T>
+std::string format_float(const T &val)
+{
+    std::stringstream confidenceFloat;
+    confidenceFloat << std::fixed << std::setprecision(2);
+    confidenceFloat << val;
+    return confidenceFloat.str();
+}
 int post_process_check_consine_similarity(rknn_app_context_t* rknn_app_ctx,
                                           rknn_app_buffer* output_buffer,
                                           const char* output_folder, 
                                           const char* golden_folder,
+                                          int inference_type,
                                         Json::Value &root)
 {
     int ret = 0;
@@ -130,50 +163,145 @@ int post_process_check_consine_similarity(rknn_app_context_t* rknn_app_ctx,
         temp_data = (float*)rknn_app_unwrap_output_buffer(rknn_app_ctx, &output_buffer[idx], RKNN_TENSOR_FLOAT32, idx);
         
         // save_npy(output_path, temp_data, attr);
-        root["name"] = name_strings;
-        root["shape"] = Json::arrayValue;
-        root["data"];
+
+        root["raw"] = Json::objectValue;
+        root["raw"]["shape"] = Json::arrayValue;
+        root["raw"]["data"] = Json::arrayValue;
+        root["raw"]["name"] = name_strings;
 
         for (uint32_t colIdx = 0; colIdx < attr->n_dims; ++colIdx)
         {
-            root["shape"][colIdx] = attr->dims[colIdx];
+            root["raw"]["shape"][colIdx] = attr->dims[colIdx];
         }
 
-        enum {
-            INFERENCE_NONE,
-            INFERENCE_DEEPFACE_GENDER,
-            INFERENCE_DEEPFACE_AGE,
-            INFERENCE_DEEPFACE_RACE,
-            INFERENCE_DEEPFACE_EMOTION,
-        };
-        // TODO: make this a parameter to the function
-        int inference_type = INFERENCE_DEEPFACE_GENDER;
+        // General algorithm to write an n-dimensional array to json
+        size_t currentIdx = 0;
+        Json::Value &walk = root["raw"]["data"];
+        for (size_t colIdx=0; colIdx < attr->n_dims; colIdx++)
+        {
+            walk[(int)colIdx] = Json::arrayValue;
+            for (size_t cellIdx=0; cellIdx<attr->dims[colIdx]; cellIdx++)
+            {
+                root["raw"]["data"][(int)colIdx][(int)cellIdx] = temp_data[currentIdx++];
+            }
+            walk = walk[(int)colIdx];
+        }
 
         switch (inference_type)
         {
-            case INFERENCE_DEEPFACE_GENDER:
-                assert(attr->n_dims == 2);
-                assert(attr->dims[0] == 1);
-                assert(attr->dims[1] == 2);
-
-                root["data"]["gender"]["prob_female"] = temp_data[0];
-                root["data"]["gender"]["prob_male"] = temp_data[1];
-
-                break;
-
-            default:
-                // General algorithm to write an n-dimensional array to json
-                size_t currentIdx = 0;
-                Json::Value &walk = root["data"];
-                for (size_t colIdx=0; colIdx < attr->n_dims; colIdx++)
+            case INFERENCE_DEEPFACE_AGE: // see deepface/models/demography/Age.py
+            {
+                assert (attr->n_dims == 2);
+                assert (attr->dims[0] == 1);
+                assert (attr->dims[1] == 101);
+                
+                double sum = 0.0;
+                for (int idx=0; idx<attr->dims[1]; idx++)
                 {
-                    walk[(int)colIdx] = Json::arrayValue;
-                    for (size_t cellIdx=0; cellIdx<attr->dims[colIdx]; cellIdx++)
-                    {
-                        root["data"][(int)colIdx][(int)cellIdx] = temp_data[currentIdx++];
-                    }
-                    walk = walk[(int)colIdx];
+                    sum += idx * temp_data[idx];
                 }
+
+                root["inference"] = format_float(sum);
+            }
+                break;
+            case INFERENCE_DEEPFACE_GENDER: // see deepface/modules/demography.py
+            {
+                std::vector<std::string> labels {"female", "male"};
+                
+                assert (attr->n_dims == 2);
+                assert (attr->dims[0] == 1);
+                assert (attr->dims[1] == labels.size());
+
+                double sum_of_predictions = 0.0;
+                for (size_t label_idx=0; label_idx<labels.size(); label_idx++)
+                {
+                    sum_of_predictions += temp_data[label_idx];
+                }
+
+                root["confidence"] = Json::objectValue;
+                double max_confidence = 0.0;
+                size_t label_idx_max_conf = 0;
+
+                for (size_t label_idx=0; label_idx<labels.size(); label_idx++)
+                {
+                    double race_prediction = 100 * temp_data[label_idx] / sum_of_predictions;
+                    root["confidence"][labels[label_idx]] = format_float(race_prediction);
+                    if (race_prediction > max_confidence)
+                    {
+                        label_idx_max_conf = label_idx;
+                        max_confidence = race_prediction;
+                    }
+                }
+
+                root["inference"] = labels[label_idx_max_conf];
+            }
+                break;
+            case INFERENCE_DEEPFACE_RACE: // see deepface/modules/demography.py
+            {
+                std::vector<std::string> labels {"asian", "indian", "black", "white", "middle eastern", "latino hispanic"};
+                
+                assert (attr->n_dims == 2);
+                assert (attr->dims[0] == 1);
+                assert (attr->dims[1] == labels.size());
+
+                double sum_of_predictions = 0.0;
+                for (size_t label_idx=0; label_idx<labels.size(); label_idx++)
+                {
+                    sum_of_predictions += temp_data[label_idx];
+                }
+
+                root["confidence"] = Json::objectValue;
+                double max_confidence = 0.0;
+                size_t label_idx_max_conf = 0;
+
+                for (size_t label_idx=0; label_idx<labels.size(); label_idx++)
+                {
+                    double race_prediction = 100 * temp_data[label_idx] / sum_of_predictions;
+                    root["confidence"][labels[label_idx]] = format_float(race_prediction);
+                    if (race_prediction > max_confidence)
+                    {
+                        label_idx_max_conf = label_idx;
+                        max_confidence = race_prediction;
+                    }
+                }
+
+                root["inference"] = labels[label_idx_max_conf];
+            }
+                break;
+            case INFERENCE_DEEPFACE_EMOTION: // see deepface/modules/demography.py
+            {
+                std::vector<std::string> labels {"angry", "disgust", "fear", "happy", "sad", "surprise", "neutral"};
+
+                assert (attr->n_dims == 2);
+                assert (attr->dims[0] == 1);
+                assert (attr->dims[1] == labels.size());
+
+                double sum_of_predictions = 0.0;
+                for (size_t label_idx=0; label_idx<labels.size(); label_idx++)
+                {
+                    sum_of_predictions += temp_data[label_idx];
+                }
+
+                root["confidence"] = Json::objectValue;
+                double max_confidence = 0.0;
+                size_t label_idx_max_conf = 0;
+
+                for (size_t label_idx=0; label_idx<labels.size(); label_idx++)
+                {
+                    double race_prediction = 100 * temp_data[label_idx] / sum_of_predictions;
+                    root["confidence"][labels[label_idx]] = format_float(race_prediction);
+                    if (race_prediction > max_confidence)
+                    {
+                        label_idx_max_conf = label_idx;
+                        max_confidence = race_prediction;
+                    }
+                }
+
+                root["inference"] = labels[label_idx_max_conf];
+            }
+                break;
+            default:
+                root["inference"] = "Not implemented";
         }
 
 
@@ -229,11 +357,31 @@ int get_data_shapes(const char* input_path, rknn_tensor_attr* shape_container){
 
 int main(int argc, char* argv[]){
     if (argc < 2 ){
-        printf("Usage: ./rknn_app_demo model_path image_dir repeat_times\n");
-        printf("  Example: ./rknn_app_demo ./Age.rknn ./data/ 20\n");
+        printf("Usage: ./rknn_app_demo image_path [model_path]\n");
+        printf("  Example: ./rknn_app_demo ./data/holly.jpg [./Age.rknn] \n");
         return -1;
     }
 
+    std::string inpath = argv[1];
+    std::vector<int> models;
+
+    if (argc > 2)
+    {
+        std::string model(argv[2]);
+        auto modelIt = std::find(DEEPFACE_DEMOGRAPHIC_MODEL_NAMES.begin(), DEEPFACE_DEMOGRAPHIC_MODEL_NAMES.end(), model);
+        if ( modelIt == DEEPFACE_DEMOGRAPHIC_MODEL_NAMES.end())
+        {
+            printf("Couldn't find model: %s\n", model);
+            throw(1);
+        }
+        models.push_back(modelIt - DEEPFACE_DEMOGRAPHIC_MODEL_NAMES.begin());
+    }
+    else
+    {
+        for (int i=INFERENCE_DEEPFACE_FIRST; i<INFERENCE_DEEPFACE_LAST; i++)
+            models.push_back(i);
+    }
+    
 #ifdef USE_INOTIFY
  	struct sigaction sigIntHandler;
 
@@ -246,25 +394,6 @@ int main(int argc, char* argv[]){
 #endif
     int ret = 0;
 
-    // TODO: make model_path optional. if no path given, loop over all models and create one .out.json file
-    std::vector<std::string> models {
-        "facial_attribute.Gender.rknn",
-        // "facial_attribute.Age.rknn",
-        // "facial_attribute.Race.rknn",
-        // "facial_attribute.Emotion.rknn",
-    };
-
-    // init rknn_app
-    rknn_app_context_t Age_ctx;
-    memset(&Age_ctx, 0, sizeof(rknn_app_context_t));
-    const char* model_path = argv[1];
-    std::string inpath (argv[2]);
-    bool verbose_log = true;
-    ret = init_rknn_app(&Age_ctx, model_path, verbose_log);
-    if (ret != 0){
-        printf("init rknn app failed\n");
-        return -1;
-    }
 
 
 #ifdef USE_INOTIFY
@@ -349,11 +478,37 @@ int main(int argc, char* argv[]){
                                 builder["precision"] = 2;
 
                                 root["imgPath"] = s;
+
+                                for (int inferenceType : models)
+                                {
+                                // intentional mis-indentation
+
+                                // skip emotion, doesn't work right
+                                if (inferenceType == INFERENCE_DEEPFACE_EMOTION)
+                                    continue;
+
+                                printf("\n");
+                                printf("Starting model: %d %s\n", inferenceType, DEEPFACE_DEMOGRAPHIC_MODEL_PATHS[inferenceType].c_str());
+                                // init rknn_app
+                                rknn_app_context_t Age_ctx;
+                                memset(&Age_ctx, 0, sizeof(rknn_app_context_t));
+                                bool verbose_log = true;
+                                ret = init_rknn_app(&Age_ctx, ("/userdata/rknn_apps/rknn_deepface_demographics/" + DEEPFACE_DEMOGRAPHIC_MODEL_PATHS[inferenceType]).c_str(), verbose_log);
+                                if (ret != 0){
+                                    printf("init rknn app failed\n");
+                                    return -1;
+                                }
+
+                                std::string faceImgPath = s;
+                                if (inferenceType == INFERENCE_DEEPFACE_EMOTION) // resize the image
+                                {
+                                    faceImgPath.append(".gray8.48x48.png");
+                                }
 #ifdef DYNAMIC_SHAPE_COMPATABLE
                                 // set input shape
                                 rknn_tensor_attr shape_container[Age_ctx.n_input];
                                 memset(shape_container, 0, sizeof(rknn_tensor_attr) * Age_ctx.n_input);
-                                ret = get_data_shapes(s.c_str(), shape_container);
+                                ret = get_data_shapes(faceImgPath.c_str(), shape_container);
                                 if (ret < 0){
                                     ret = rknn_app_switch_dyn_shape(&Age_ctx, Age_ctx.in_attr);
                                 }
@@ -375,8 +530,9 @@ int main(int argc, char* argv[]){
                                     return -1;
                                 }
 
+                        
                                 // load input data and wrap to input buffer
-                                ret = load_input_data(&Age_ctx, s.c_str(), Age_input_buffer);
+                                ret = load_input_data(&Age_ctx, faceImgPath.c_str(), Age_input_buffer);
                                 int input_given = ret;
 
                                 // inference
@@ -391,17 +547,24 @@ int main(int argc, char* argv[]){
                                 }
 
                                 // save output result as npy
-                                if ((argc > 2) && (input_given>-1)){
-                                    ret = post_process_check_consine_similarity(&Age_ctx, Age_output_buffer, inpath.c_str(), "./data/outputs/golden", root);
+                                if ((argc >= 2) && (input_given>-1)){
+                                    root[DEEPFACE_DEMOGRAPHIC_MODEL_NAMES[inferenceType]] = Json::objectValue;
+                                    root[DEEPFACE_DEMOGRAPHIC_MODEL_NAMES[inferenceType]]["model"] = DEEPFACE_DEMOGRAPHIC_MODEL_PATHS[inferenceType];
+                                    ret = post_process_check_consine_similarity(&Age_ctx, Age_output_buffer, inpath.c_str(), "./data/outputs/golden", inferenceType, root[DEEPFACE_DEMOGRAPHIC_MODEL_NAMES[inferenceType]]);
                                 }
                                 else{
                                     printf("Inputs was not given, skip save output\n");
                                 }
 
+                                // release rknn
+                                release_rknn_app(&Age_ctx);
+                                // intentional mis-indentation end
+                                }
                                 {
                                     std::string response(Json::writeString(builder, root));
 
-                                    std::string resultDataPath(inpath + ".out.json");
+                                    std::string resultDataPath(ps + ".out.json");
+                                    printf("Face result path: %s\n", resultDataPath.c_str());
                                     std::ofstream dataFileOut(resultDataPath.c_str());
 
                                     if (dataFileOut.is_open())
@@ -428,8 +591,6 @@ out:
     inotify_rm_watch(inotifyFd, wd);
 #endif
 
-    // release rknn
-    release_rknn_app(&Age_ctx);
 
     return 0;
 }

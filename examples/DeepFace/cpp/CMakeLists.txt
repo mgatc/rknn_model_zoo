@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.4.1)
 
-project(rknn_app_demo)
+project(rknn_deepface_demographics)
 
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS}")
@@ -46,14 +46,14 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set(PTHREAD_LIB pthread)
 endif()
 
-add_executable(rknn_app_demo
+add_executable(rknn_deepface_demographics
           src/main.cc
           src/rknn_app.cc
           ${RESIZE_FUNC_CC}
           ${CNPY_CPP}
         )
 
-target_link_libraries(rknn_app_demo
+target_link_libraries(rknn_deepface_demographics
       ${RKNN_RT_LIB}
       ${LIBZ_LIB}
       ${PTHREAD_LIB}
@@ -61,19 +61,17 @@ target_link_libraries(rknn_app_demo
       jsoncpp
   )
 if (CMAKE_SYSTEM_NAME STREQUAL "Android")
-  target_link_libraries(rknn_app_demo
+  target_link_libraries(rknn_deepface_demographics
       log
   )
 endif()
 
 
 # install target and libraries
-set(CMAKE_INSTALL_PREFIX ${CMAKE_SOURCE_DIR}/install/rknn_app_demo_${CMAKE_SYSTEM_NAME})
-install(TARGETS rknn_app_demo DESTINATION ./)
+set(CMAKE_INSTALL_PREFIX ${CMAKE_SOURCE_DIR}/install/rknn_deepface_demographics)
+install(TARGETS rknn_deepface_demographics DESTINATION ./)
 
 install(PROGRAMS ${RKNN_RT_LIB} DESTINATION lib)
-install(PROGRAMS ${CMAKE_SOURCE_DIR}/run.sh DESTINATION ./)
-install(DIRECTORY ${CMAKE_SOURCE_DIR}/data DESTINATION ./)
 install(PROGRAMS ${CMAKE_SOURCE_DIR}/../model/facial_attribute.Age.rknn DESTINATION ./)
 install(PROGRAMS ${CMAKE_SOURCE_DIR}/../model/facial_attribute.Gender.rknn DESTINATION ./)
 install(PROGRAMS ${CMAKE_SOURCE_DIR}/../model/facial_attribute.Race.rknn DESTINATION ./)
